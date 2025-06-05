@@ -3,6 +3,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from persiantools.jdatetime import JalaliDate
+import os
+import io
 
 # ----------- تنظیمات صفحه و پس زمینه و رنگ فونت -----------
 st.set_page_config(page_title="داشبورد پایش برق کنسانتره", layout="wide")
@@ -29,7 +31,16 @@ if uploaded_logo is not None:
     st.sidebar.image(uploaded_logo, width=150)
 
 # ------------ بارگذاری فایل اکسل -------------
+default_excel_path = "نمونه_کنسانتره.xlsx"
 uploaded_file = st.file_uploader("📂 لطفاً فایل اکسل کنسانتره را بارگذاری کنید", type=["xlsx"])
+
+if uploaded_file is None:
+    if os.path.exists(default_excel_path):
+        uploaded_file = default_excel_path
+        st.info("📌 از فایل پیش‌فرض استفاده شده است: نمونه_کنسانتره.xlsx")
+    else:
+        st.warning("⚠️ فایل اکسل بارگذاری نشده و فایل پیش‌فرض هم موجود نیست.")
+        st.stop()
 
 def make_unique_columns(cols):
     seen = {}
@@ -44,11 +55,17 @@ def make_unique_columns(cols):
     return new_cols
 
 if uploaded_file is not None:
-    xls = pd.ExcelFile(uploaded_file)
-    all_sheets = xls.sheet_names
+    try:
+        xls = pd.ExcelFile(uploaded_file)
+        if not xls.sheet_names:
+            st.error("⚠️ فایل اکسل هیچ شیتی ندارد!")
+            st.stop()
+    except Exception as e:
+        st.error(f"⚠️ خطا در خواندن فایل اکسل: {str(e)}")
+        st.stop()
 
     dfs = []
-    for sheet in all_sheets:
+    for sheet in xls.sheet_names:
         df_sheet = pd.read_excel(uploaded_file, sheet_name=sheet, header=None)
         raw_headers = df_sheet.iloc[1].fillna("بدون عنوان")
         df_sheet = df_sheet.dropna(axis=1, how="all")
@@ -71,11 +88,15 @@ if uploaded_file is not None:
 
     df = pd.concat(dfs, ignore_index=True)
 
-    df['تاریخ شمسی'] = df['تاریخ'].apply(lambda x: JalaliDate(x).strftime('%Y/%m/%d') if pd.notnull(x) else "")
+    df['تاریخ شمسی'] = pd.to_datetime(df['تاریخ']).map(lambda x: JalaliDate(x).strftime('%Y/%m/%d') if pd.notnull(x) else "")
 
     # ---------- فیلتر کارخانه ----------
     factories = df['کارخانه'].unique().tolist()
     selected_factories = st.sidebar.multiselect("🏭 انتخاب کارخانه (کارخانه‌ها)", factories, default=factories)
+
+    if not selected_factories:
+        st.warning("⚠️ لطفاً حداقل یک کارخانه انتخاب کنید.")
+        st.stop()
 
     filtered_df = df[df['کارخانه'].isin(selected_factories)]
 
@@ -83,17 +104,28 @@ if uploaded_file is not None:
     st.sidebar.header("🎯 فیلتر بازه زمانی")
     min_date = filtered_df["تاریخ"].min()
     max_date = filtered_df["تاریخ"].max()
+    if pd.isna(min_date) or pd.isna(max_date):
+        st.error("⚠️ داده‌های تاریخ معتبر نیستند.")
+        st.stop()
+
     start_date, end_date = st.sidebar.date_input("بازه زمانی", [min_date, max_date])
     st.sidebar.text(f"از تاریخ: {JalaliDate(start_date)} تا تاریخ: {JalaliDate(end_date)}")
 
     mask = (filtered_df["تاریخ"] >= pd.to_datetime(start_date)) & (filtered_df["تاریخ"] <= pd.to_datetime(end_date))
     filtered_df = filtered_df.loc[mask]
 
+    if filtered_df.empty:
+        st.warning("⚠️ هیچ داده‌ای برای بازه زمانی انتخاب‌شده یافت نشد.")
+        st.stop()
+
     st.title("📊 داشبورد پایش مصرف برق تجهیزات کنسانتره")
 
-    # استخراج ستون‌های عددی فقط مربوط به کارخانه‌های انتخاب‌شده
+    # استخراج ستون‌های عددی از داده‌های فیلترشده
     columns = filtered_df.select_dtypes(include="number").columns.tolist()
     columns = [c for c in columns if c not in ['کارخانه']]
+    if not columns:
+        st.warning("⚠️ هیچ ستون عددی برای نمایش یافت نشد.")
+        st.stop()
 
     st.subheader("📌 مقایسه میانگین مصرف چند تجهیز")
     selected_columns = st.multiselect("🔌 انتخاب تجهیزات:", columns)
@@ -149,8 +181,8 @@ if uploaded_file is not None:
 
     # ---------- نمودار مصرف ماهیانه ----------
     st.subheader("📆 نمودار مصرف ماهیانه تجهیزات")
-    filtered_df['ماه شمسی'] = filtered_df['تاریخ'].apply(lambda x: JalaliDate(x).strftime('%Y/%m'))
-    monthly_column = st.selectbox("📌 انتخاب تجهیز برای نمودار ماهیانه", columns)
+    filtered_df['ماه شمسی'] = pd.to_datetime(filtered_df['تاریخ']).map(lambda x: JalaliDate(x).strftime('%Y/%m'))
+    monthly_column = st.selectbox("📌 انتخاب تجهیز برای نمودار ماهیانه:", columns)
 
     if monthly_column:
         monthly_df = (
@@ -194,7 +226,6 @@ if uploaded_file is not None:
     to_excel = display_df.copy()
     to_excel['تاریخ'] = to_excel['تاریخ'].dt.strftime('%Y-%m-%d')
 
-    import io
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         to_excel.to_excel(writer, index=False, sheet_name='گزارش')
